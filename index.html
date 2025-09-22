@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Plane vs Asteroids</title>
+  <style>
+    body { margin:0; background:black; overflow:hidden; height:100vh; }
+    canvas { display:block; margin:0 auto; background:radial-gradient(circle at center, #00111a, #000); }
+    #ui { 
+      position:absolute; 
+      top:10px; 
+      left:10px; 
+      color:white; 
+      font:16px Arial; 
+      display:flex; 
+      align-items:center; 
+      gap:10px;
+      flex-wrap:wrap;
+      z-index: 10;
+    }
+    button { 
+      width:60px; 
+      height:60px; 
+      font-size:22px; 
+      font-weight:bold; 
+      border:none; 
+      border-radius:15px; 
+      cursor:pointer; 
+      color:white; 
+      text-shadow:1px 1px 2px black;
+      background: linear-gradient(45deg, red, orange, yellow, green, blue, indigo, violet);
+      background-size: 400% 400%;
+      animation: rainbow 6s linear infinite;
+      opacity:0.5;
+    }
+    button.active { opacity:1; }
+    #restartBtn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 160px;
+      height: 70px;
+      font-size: 26px;
+      font-weight: bold;
+      border: none;
+      border-radius: 20px;
+      cursor: pointer;
+      color: white;
+      text-shadow: 1px 1px 2px black;
+      background: linear-gradient(45deg, red, orange, yellow, green, blue, indigo, violet);
+      background-size: 400% 400%;
+      animation: rainbow 6s linear infinite;
+      display: none;
+      z-index: 20;
+    }
+    @keyframes rainbow {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="ui">
+    <span id="score">Score: 0</span>
+    <span id="missiles"> Missiles: 0</span>
+    <span id="circlefires"> Circlefire: 0</span>
+    <span id="status"></span>
+    <button id="missileBtn" disabled>M</button>
+    <button id="circleBtn" disabled>C</button>
+    <button id="fastBtn" disabled>F</button>
+  </div>
+  <button id="restartBtn">RESTART</button>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // --- Resize canvas to full screen ---
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+
+    function getW() { return canvas.width; }
+    function getH() { return canvas.height; }
+
+    // --- Load Images ---
+    const planeImg = new Image(); planeImg.src = "plane.png";
+    const missileImg = new Image(); missileImg.src = "missile.png";
+    const asteroidImg = new Image(); asteroidImg.src = "asteroid.png";
+    const circlefireImg = new Image(); circlefireImg.src = "round fire.png";
+    const fastfireImg = new Image(); fastfireImg.src = "rapid fire.png";
+
+    // --- UI Buttons ---
+    const missileBtn = document.getElementById("missileBtn");
+    const circleBtn = document.getElementById("circleBtn");
+    const fastBtn = document.getElementById("fastBtn");
+    const restartBtn = document.getElementById("restartBtn");
+
+    // --- Game State ---
+    let player, bullets, missiles, asteroids, gifts;
+    let keys = {}, score = 0, gameOver = false, paused = false;
+    let missileStock = 0, fastFireTimer = 0, circlefireStock = 0;
+
+    function clamp(x,min,max){ return x<min?min:x>max?max:x; }
+    function rand(min,max){ return Math.random()*(max-min)+min; }
+
+    function init(){
+      player = { x:getW()/2, y:getH()-80, w:60, h:60, speed:300, lastShot:0, reload:250 };
+      bullets=[]; missiles=[]; asteroids=[]; gifts=[];
+      score=0; gameOver=false; missileStock=0; circlefireStock=0; fastFireTimer=0;
+      document.getElementById("status").innerText="";
+      disableBtn(missileBtn); disableBtn(circleBtn); disableBtn(fastBtn);
+    }
+
+    function createBullet(x,y,vx=0,vy=-400,r=4,color="yellow"){
+      return {x,y,vx,vy,r,alive:true,color};
+    }
+    function createMissile(x,y){ return {x,y,vx:0,vy:-300,alive:true,hits:0,target:null}; }
+    function createAsteroid(){
+      return {x:rand(30,getW()-30), y:-40, w:40, h:40, vy:rand(60,120), rot:0, vr:rand(-1,1), alive:true};
+    }
+    function createGift(){
+      const r = Math.random();
+      let type = r < 0.5 ? "missile" : r < 0.75 ? "fastfire" : "circlefire";
+      return {x:rand(30,getW()-30), y:-20, w:20, h:20, vy:80, type, alive:true};
+    }
+
+    // --- Controls ---
+    window.addEventListener("keydown", e=>{ keys[e.key.toLowerCase()] = true; });
+    window.addEventListener("keyup", e=>{ keys[e.key.toLowerCase()] = false; });
+
+    // --- Button States ---
+    function enableBtn(btn){ btn.disabled=false; btn.classList.add("active"); }
+    function disableBtn(btn){ btn.disabled=true; btn.classList.remove("active"); }
+
+    // --- Button Clicks ---
+    missileBtn.onclick = ()=>{ 
+      if(missileStock>0){ 
+        missiles.push(createMissile(player.x, player.y-player.h/2)); 
+        missileStock--; 
+        if(missileStock<=0) disableBtn(missileBtn);
+      } 
+    };
+    circleBtn.onclick = ()=>{ triggerCirclefire(); };
+    fastBtn.onclick = ()=>{ fastFireTimer=8000; disableBtn(fastBtn); };
+
+    restartBtn.onclick = ()=>{ restartBtn.style.display="none"; restartGame(); };
+
+    // --- Shooting ---
+    function shootBullet(t){
+      const fireRate = fastFireTimer>0 ? 100 : player.reload;
+      if(t - player.lastShot > fireRate){
+        bullets.push(createBullet(player.x, player.y-player.h/2));
+        player.lastShot = t;
+      }
+    }
+    function handleMissileKey(){
+      if(keys["m"] && missileStock>0){
+        keys["m"]=false;
+        missiles.push(createMissile(player.x, player.y-player.h/2));
+        missileStock--;
+        if(missileStock<=0) disableBtn(missileBtn);
+      }
+    }
+    function handleCirclefireKey(){
+      if(keys["c"] && circlefireStock>0){
+        keys["c"]=false;
+        triggerCirclefire();
+      }
+    }
+    function triggerCirclefire(){
+      if(circlefireStock<=0) return;
+      circlefireStock--;
+      const num=100;
+      for(let i=0;i<num;i++){
+        const angle=(i/num)*2*Math.PI;
+        const vx=Math.cos(angle)*400, vy=Math.sin(angle)*400;
+        const hue = (i/num)*360;
+        const color = `hsl(${hue},100%,50%)`;
+        bullets.push(createBullet(player.x, player.y, vx, vy, 4, color));
+      }
+      if(circlefireStock<=0) disableBtn(circleBtn);
+    }
+
+    // --- Update ---
+    let asteroidSpawn=0, giftSpawn=0;
+    function update(dt,t){
+      if(paused||gameOver) return;
+
+      const dx=(keys["arrowleft"]||keys["a"]?-1:0)+(keys["arrowright"]||keys["d"]?1:0);
+      const dy=(keys["arrowup"]||keys["w"]?-1:0)+(keys["arrowdown"]||keys["s"]?1:0);
+      player.x = clamp(player.x+dx*player.speed*dt, player.w/2, getW()-player.w/2);
+      player.y = clamp(player.y+dy*player.speed*dt, player.h/2, getH()-player.h/2);
+
+      if(keys[" "]) shootBullet(t);
+      handleMissileKey();
+      handleCirclefireKey();
+
+      for(let b of bullets){
+        b.x += b.vx*dt; b.y += b.vy*dt;
+        if(b.y<0||b.x<0||b.x>getW()||b.y>getH()) b.alive=false;
+      }
+
+      for(let m of missiles){
+        if(!m.target || !m.target.alive){
+          if(asteroids.length > 0){
+            let available = asteroids.filter(a => a.alive);
+            if(available.length > 0){
+              m.target = available[Math.floor(Math.random() * available.length)];
+            }
+          }
+        }
+        if(m.target && m.target.alive){
+          const angle = Math.atan2(m.target.y - m.y, m.target.x - m.x);
+          m.vx = Math.cos(angle) * 200;
+          m.vy = Math.sin(angle) * 200;
+        }
+        m.x += m.vx*dt; m.y += m.vy*dt;
+        if(m.y<0||m.y>getH()||m.x<0||m.x>getW()) m.alive=false;
+      }
+
+      asteroidSpawn-=dt;
+      if(asteroidSpawn<=0){ 
+        asteroids.push(createAsteroid()); 
+        asteroidSpawn=rand(0.2,0.6); 
+      }
+      for(let a of asteroids){ a.y+=a.vy*dt; a.rot+=a.vr*dt; if(a.y>getH()+50) a.alive=false; }
+
+      giftSpawn-=dt;
+      if(giftSpawn<=0){ gifts.push(createGift()); giftSpawn=rand(6,10); }
+      for(let g of gifts){ g.y+=g.vy*dt; if(g.y>getH()+30) g.alive=false; }
+
+      for(let b of bullets){
+        for(let a of asteroids){
+          if(Math.hypot(b.x-a.x,b.y-a.y)<a.w/2){ b.alive=false; a.alive=false; score+=10; break; }
+        }
+      }
+
+      for(let m of missiles){
+        for(let a of asteroids){
+          if(Math.hypot(m.x-a.x,m.y-a.y)<a.w/2){
+            a.alive=false; m.hits++; score+=20;
+            if(m.hits>=2){ m.alive=false; }
+          }
+        }
+      }
+
+      for(let a of asteroids){
+        if(Math.hypot(a.x-player.x,a.y-player.y)<(a.w+player.w)/2*0.6){ 
+          gameOver=true; 
+          document.getElementById("status").innerText=" GAME OVER"; 
+          restartBtn.style.display="block";
+        }
+      }
+
+      for(let g of gifts){
+        if(Math.hypot(g.x-player.x,g.y-player.y)<(g.w+player.w)/2*0.7){
+          g.alive=false;
+          if(g.type==="missile"){ missileStock+=5; enableBtn(missileBtn); }
+          if(g.type==="fastfire"){ fastFireTimer=8000; enableBtn(fastBtn); }
+          if(g.type==="circlefire"){ circlefireStock++; enableBtn(circleBtn); }
+        }
+      }
+
+      if(fastFireTimer>0) fastFireTimer-=dt*1000;
+      if(fastFireTimer<=0) disableBtn(fastBtn);
+
+      bullets=bullets.filter(o=>o.alive);
+      missiles=missiles.filter(o=>o.alive);
+      asteroids=asteroids.filter(o=>o.alive);
+      gifts=gifts.filter(o=>o.alive);
+
+      document.getElementById("score").innerText="Score: "+score;
+      document.getElementById("missiles").innerText=" Missiles: "+missileStock;
+      document.getElementById("circlefires").innerText=" Circlefire: "+circlefireStock;
+    }
+
+    // --- Draw ---
+    function draw(){
+      ctx.clearRect(0,0,getW(),getH());
+      ctx.fillStyle="black"; ctx.fillRect(0,0,getW(),getH());
+      ctx.fillStyle="white"; for(let i=0;i<40;i++) ctx.fillRect(Math.random()*getW(), Math.random()*getH(),1,1);
+
+      if(planeImg.complete) ctx.drawImage(planeImg, player.x-player.w/2, player.y-player.h/2, player.w, player.h);
+
+      for(let b of bullets){ 
+        ctx.fillStyle=b.color || "yellow"; 
+        ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill(); 
+      }
+
+      for(let m of missiles){
+        ctx.save();
+        ctx.translate(m.x,m.y);
+        const angle=Math.atan2(m.vy,m.vx);
+        ctx.rotate(angle+Math.PI/2);
+        ctx.drawImage(missileImg,-15,-25,30,50);
+        ctx.restore();
+      }
+
+      for(let a of asteroids){
+        ctx.save();
+        ctx.translate(a.x,a.y); ctx.rotate(a.rot);
+        ctx.drawImage(asteroidImg,-a.w/2,-a.h/2,a.w,a.h);
+        ctx.restore();
+      }
+
+      for(let g of gifts){
+        if(g.type==="missile"){
+          ctx.drawImage(missileImg, g.x-12, g.y-12, 24, 24);
+        } else if(g.type==="fastfire"){
+          ctx.drawImage(fastfireImg, g.x-15, g.y-15, 30, 30);
+        } else if(g.type==="circlefire"){
+          ctx.drawImage(circlefireImg, g.x-15, g.y-15, 30, 30);
+        }
+      }
+    }
+
+    // --- Main Loop ---
+    let last=0;
+    function loop(ts){
+      let dt=(ts-last)/1000; last=ts;
+      update(dt,ts); draw();
+      requestAnimationFrame(loop);
+    }
+    function restartGame(){ init(); restartBtn.style.display="none"; }
+    init(); requestAnimationFrame(loop);
+
+    // --- Touch Controls for Mobile ---
+    let touchActive = false;
+    canvas.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      const touch = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      const x = touch.clientX - rect.left;
+      const y = touch.clientY - rect.top;
+
+      if (Math.abs(x - player.x) < player.w && Math.abs(y - player.y) < player.h) {
+        touchActive = true;
+        player.x = x;
+        player.y = y;
+        keys[" "] = true; // auto fire
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchmove", (e) => {
+      if (!touchActive) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      player.x = touch.clientX - rect.left;
+      player.y = touch.clientY - rect.top;
+    }, { passive: false });
+
+    canvas.addEventListener("touchend", () => {
+      touchActive = false;
+      keys[" "] = false;
+    });
+  </script>
+</body>
+</html>
